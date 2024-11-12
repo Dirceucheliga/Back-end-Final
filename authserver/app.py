@@ -1,49 +1,54 @@
 from fastapi import FastAPI, HTTPException, status, Depends
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr, Field
 from typing import List, Optional
 from sqlalchemy import Column, String, Integer, Table, ForeignKey, create_engine
 from sqlalchemy.orm import sessionmaker, relationship, declarative_base, Session
 from sqlalchemy.exc import IntegrityError
+from datetime import datetime, timedelta
+from jose import JWTError, jwt
 import logging
 
-# configuração do banco de dados (usando SQLite para simplicidade)
 DATABASE_URL = "sqlite:///./test.db"
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# configuração de logging
+# config de logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("authserver")
 
-# fastAPI app e Swagger
+# Configuração do FastAPI
 app = FastAPI(title="AuthServer API")
 
-# modelos de dados com SQLAlchemy
-# modelo de Role (Função)
+# config do segredo jwt
+SECRET_KEY = "your_secret_key" 
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
+
+#dad0s com sqlalchemy
 class Role(Base):
     __tablename__ = "roles"
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     name = Column(String, unique=True, nullable=False)
     description = Column(String)
 
-# modelo de Usuário
+# modelo de usuário
 user_roles = Table("user_roles", Base.metadata,
                    Column("user_id", ForeignKey("users.id")),
                    Column("role_id", ForeignKey("roles.id")))
 
 class User(Base):
     __tablename__ = "users"
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     name = Column(String, nullable=False)
     email = Column(String, unique=True, nullable=False)
     password = Column(String, nullable=False)
     roles = relationship("Role", secondary=user_roles)
 
-# criando tabelas no banco de dados
 Base.metadata.create_all(bind=engine)
 
-# schemas Pydantic
+# esquemas pydantic
 class RoleBase(BaseModel):
     name: str = Field(..., pattern="^[A-Z][0-9A-Z]*$")
     description: str
@@ -67,7 +72,12 @@ class UserResponse(BaseModel):
     name: str
     email: EmailStr
 
-# Dependência do banco de dados
+# modelo token jwt
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+# dp do banco d dados
 def get_db():
     db = SessionLocal()
     try:
@@ -75,7 +85,6 @@ def get_db():
     finally:
         db.close()
 
-# Serviço de Usuário
 class UserService:
     def __init__(self, db: Session):
         self.db = db
@@ -85,7 +94,9 @@ class UserService:
         try:
             self.db.add(db_user)
             self.db.commit()
-            self.db.refresh(db_user)
+            
+            self.db.refresh(db_user) 
+            
             return db_user
         except IntegrityError:
             self.db.rollback()
@@ -102,7 +113,65 @@ class UserService:
             return True
         return False
 
-# Endpoints para Usuários
+# funcao para auth e geracao de token jwt
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=15)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+
+def authenticate_user(db, email: str, password: str):
+    user = db.query(User).filter(User.email == email).first()
+    if not user or user.password != password:
+        return False
+    return user
+
+def get_current_user(db: Session = Depends(get_db), token: str = Depends(oauth2_scheme)):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Credenciais de autenticação inválidas",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email: str = payload.get("sub")
+        if email is None:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+    user = db.query(User).filter(User.email == email).first()
+    if user is None:
+        raise credentials_exception
+    return user
+
+# endpoints de autenticacao
+@app.post("/login", response_model=Token)
+def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    user = authenticate_user(db, form_data.username, form_data.password)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Email ou senha incorretos",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user.email}, expires_delta=access_token_expires
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
+
+# rota para obter info do usuario com base no token
+@app.get("/users/me", response_model=UserResponse)
+def read_users_me(current_user: User = Depends(get_current_user)):
+    return current_user
+
+# endpoints para users
 @app.post("/users", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 def create_user(user: UserCreate, db: Session = Depends(get_db)):
     service = UserService(db)
@@ -122,7 +191,13 @@ def delete_user(user_id: int, db: Session = Depends(get_db)):
     if not service.delete_user(user_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuário não encontrado")
 
-# Endpoints para Roles (Funções)
+# endpoint para buscar todos os users
+@app.get("/users", response_model=List[UserResponse])
+def get_all_users(db: Session = Depends(get_db)):
+    users = db.query(User).all()
+    return users
+
+# endpoints para roles
 @app.post("/roles", response_model=RoleResponse, status_code=status.HTTP_201_CREATED)
 def create_role(role: RoleCreate, db: Session = Depends(get_db)):
     db_role = Role(name=role.name, description=role.description)
@@ -139,26 +214,20 @@ def create_role(role: RoleCreate, db: Session = Depends(get_db)):
 def get_roles(db: Session = Depends(get_db)):
     return db.query(Role).all()
 
-# Iniciando o servidor
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8000)
-
-
+# configuração de cors
 from fastapi.middleware.cors import CORSMiddleware
-
-# Depois de criar a instância FastAPI
-app = FastAPI(title="AuthServer API")
-
-# Configuração do CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Pode listar domínios específicos em vez de "*"
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],  # Permite todos os métodos (GET, POST, etc.)
-    allow_headers=["*"],  # Permite todos os cabeçalhos
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 @app.get("/")
 async def root():
     return {"message": "Bem-vindo à API AuthServer"}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="127.0.0.1", port=8000)

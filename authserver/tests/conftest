@@ -1,0 +1,10 @@
+import pytest
+from authserver.app import SessionLocal
+
+# Fixture de banco de dados para os testes
+@pytest.fixture(scope="module")
+def db_session():
+    db = SessionLocal()
+    yield db
+    db.rollback()
+    db.close()

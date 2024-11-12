@@ -1,0 +1,15 @@
+import pytest
+from authserver.app import UserService, UserCreate
+
+# Teste para criar um usuário
+def test_create_user(db_session):
+    service = UserService(db_session)
+    user_data = UserCreate(name="John Doe", email="john@authserver.com", password="p@ssw0rd!")
+    user = service.create_user(user_data)
+    assert user.email == "john@authserver.com"
+
+# Teste para verificar se um usuário não encontrado retorna None
+def test_user_not_found(db_session):
+    service = UserService(db_session)
+    user = service.get_user(9999)  # ID inexistente
+    assert user is None

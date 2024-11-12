@@ -1,0 +1,21 @@
+from authserver.app import app as fastapi_app
+from fastapi.testclient import TestClient
+
+# Configurando o cliente de teste do FastAPI
+client = TestClient(fastapi_app)
+
+# Teste de API para verificar endpoint de criação de usuário
+def test_api_create_user():
+    response = client.post("/users", json={
+        "name": "Jane Doe",
+        "email": "jane@authserver.com",
+        "password": "securepass"
+    })
+    assert response.status_code == 201
+    assert response.json()["email"] == "jane@authserver.com"
+
+# Teste de API para verificar endpoint de busca de usuário não encontrado
+def test_api_user_not_found():
+    response = client.get("/users/9999")  # ID inexistente
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Usuário não encontrado"
